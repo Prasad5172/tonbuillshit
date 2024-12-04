@@ -1,0 +1,94 @@
+import { 
+    Contract, 
+    ContractProvider, 
+    Sender, 
+    Address, 
+    Cell, 
+    contractAddress, 
+    beginCell 
+} from '@ton/core';
+
+export default class CrowdfundingContract implements Contract {
+    static createForDeploy(code: Cell, initialCounterValue: number): CrowdfundingContract {
+        const data = beginCell()
+            .storeUint(initialCounterValue, 64)
+            .endCell();
+        const workchain = 0;
+        const address = contractAddress(workchain, { code, data });
+        return new CrowdfundingContract(address, { code, data });
+    }
+
+    constructor(readonly address: Address, readonly init?: { code: Cell; data: Cell }) {}
+
+    async getCampaign(provider: ContractProvider) {
+        const { stack } = await provider.get("get_campaign_info", []);
+        return {
+            owner: stack.readAddress(),
+            title: stack.readString(),
+            description: stack.readString(),
+            goal: stack.readBigNumber(),
+            deadline: stack.readNumber(),
+            totalRaised: stack.readBigNumber(),
+            status: stack.readNumber()
+        };
+    }
+
+    async sendDeploy(provider: ContractProvider, via: Sender, params: {
+        owner: Address,
+        title: string,
+        description: string,
+        goal: bigint,
+        deadline: number
+    }) {
+        await provider.internal(via, {
+            value: "0.1", // Deploy amount
+            bounce: false,
+            body: beginCell()
+                .storeUint(1, 32) // op: deploy
+                .storeAddress(params.owner)
+                .storeString(params.title)
+                .storeString(params.description)
+                .storeCoins(params.goal)
+                .storeUint(params.deadline, 32)
+                .endCell()
+        });
+    }
+
+    async sendDonate(provider: ContractProvider, via: Sender, amount: bigint) {
+        await provider.internal(via, {
+            value: amount.toString(),
+            bounce: false,
+            body: beginCell()
+                .storeUint(2, 32) // op: donate
+                .endCell()
+        });
+    }
+
+    async sendWithdraw(provider: ContractProvider, via: Sender) {
+        await provider.internal(via, {
+            value: "0.1", // Processing fee
+            bounce: false,
+            body: beginCell()
+                .storeUint(3, 32) // op: withdraw
+                .endCell()
+        });
+    }
+
+    async sendRefund(provider: ContractProvider, via: Sender) {
+        await provider.internal(via, {
+            value: "0.1", // Processing fee
+            bounce: false,
+            body: beginCell()
+                .storeUint(4, 32) // op: refund
+                .endCell()
+        });
+    }
+}
+
+// Campaign status enum
+const CampaignStatus = {
+    ACTIVE: 0,
+    SUCCESSFUL: 1,
+    FAILED: 2,
+    CANCELLED: 3
+};

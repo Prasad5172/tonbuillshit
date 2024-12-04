@@ -1,0 +1,147 @@
+#include "imports/stdlib.fc";
+
+;; Storage TL-B Schema
+;; storage#_ 
+;;   owner:MsgAddress 
+;;   title:^String 
+;;   description:^String 
+;;   goal:Coins 
+;;   deadline:uint32 
+;;   total_raised:Coins 
+;;   status:uint2 = Storage;
+
+const int op::init = 1;
+const int op::donate = 2;
+const int op::withdraw = 3;
+const int op::refund = 4;
+
+;; Status constants
+const int STATUS::ACTIVE = 0;
+const int STATUS::SUCCESSFUL = 1;
+const int STATUS::FAILED = 2;
+const int STATUS::CANCELLED = 3;
+
+;; Errors
+const int error::access_denied = 101;
+const int error::campaign_ended = 102;
+const int error::goal_not_reached = 103;
+const int error::already_initialized = 104;
+
+global slice owner;
+global slice title;
+global slice description;
+global int goal;
+global int deadline;
+global int total_raised;
+global int status;
+
+() load_data() impure {
+    slice ds = get_data().begin_parse();
+    owner = ds~load_msg_addr();
+    title = ds~load_ref().begin_parse();
+    description = ds~load_ref().begin_parse();
+    goal = ds~load_coins();
+    deadline = ds~load_uint(32);
+    total_raised = ds~load_coins();
+    status = ds~load_uint(2);
+}
+
+() save_data() impure {
+    set_data(
+        begin_cell()
+            .store_slice(owner)
+            .store_ref(begin_cell().store_slice(title).end_cell())
+            .store_ref(begin_cell().store_slice(description).end_cell())
+            .store_coins(goal)
+            .store_uint(deadline, 32)
+            .store_coins(total_raised)
+            .store_uint(status, 2)
+            .end_cell()
+    );
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) {
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { ;; ignore bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+    load_data();
+
+    int op = in_msg_body~load_uint(32);
+
+    if (op == op::init) {
+        throw_if(error::already_initialized, status != 0);
+        owner = in_msg_body~load_msg_addr();
+        title = in_msg_body~load_ref().begin_parse();
+        description = in_msg_body~load_ref().begin_parse();
+        goal = in_msg_body~load_coins();
+        deadline = in_msg_body~load_uint(32);
+        total_raised = 0;
+        status = STATUS::ACTIVE;
+        save_data();
+        return ();
+    }
+
+    if (op == op::donate) {
+        throw_if(error::campaign_ended, now() >= deadline);
+        throw_if(error::campaign_ended, status != STATUS::ACTIVE);
+        
+        total_raised += msg_value;
+        save_data();
+        return ();
+    }
+
+    if (op == op::withdraw) {
+        slice sender_slice = sender_address;
+        slice owner_slice = owner;
+        throw_if(error::access_denied, sender_slice.slice_bits() != owner_slice.slice_bits());
+        throw_if(error::goal_not_reached, total_raised < goal);
+        
+        ;; Send funds to owner
+        var msg = begin_cell()
+            .store_uint(0x18, 6)            ;; nobounce - int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool src:MsgAddress -> 011000
+            .store_slice(owner)             ;; to_address
+            .store_coins(total_raised)      ;; value
+            .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)  ;; 107 = size(int_msg_info$0) + size(ext_in_msg_info$10)
+            .end_cell();
+        
+        send_raw_message(msg, 1); ;; pay fees separately, revert on errors
+        status = STATUS::SUCCESSFUL;
+        save_data();
+        return ();
+    }
+
+    if (op == op::refund) {
+        throw_if(error::campaign_ended, now() <= deadline);
+        throw_if(error::goal_not_reached, total_raised >= goal);
+        
+        status = STATUS::FAILED;
+        save_data();
+        return ();
+    }
+
+    throw(0xffff); ;; Unsupported operation
+}
+
+;; Get methods
+(slice, slice, slice, int, int, int, int) get_campaign_info() method_id {
+    load_data();
+    return (owner, title, description, goal, deadline, total_raised, status);
+}
+
+int time_left() method_id {
+    load_data();
+    int time_remaining = deadline - now();
+    return time_remaining;
+}
+
+int is_owner(slice addr) method_id {
+    load_data();
+    return addr.slice_bits() == owner.slice_bits();
+}
